@@ -24,6 +24,9 @@
 #include <eosio/chain/genesis_state.hpp>
 #include <grpcpp/grpcpp.h>
 #include "eosio_grpc_client.grpc.pb.h"
+#include "transfer.grpc.pb.h"
+#include "transaction.grpc.pb.h"
+#include "block.grpc.pb.h"
 
 namespace fc { class variant; }
 
@@ -46,17 +49,40 @@ using eosio_grpc_client::EosRequest;
 using eosio_grpc_client::EosReply;
 using eosio_grpc_client::Eos_Service;
 
+using force_transfer::grpc_transfer;
+using force_transfer::TransferRequest;
+using force_transfer::TransferReply;
+
+using force_transaction::grpc_transaction;
+using force_transaction::TransactionRequest;
+using force_transaction::TransactionReply;
+
+using force_block::grpc_block;
+using force_block::BlockTransRequest;
+using force_block::BlockRequest;
+using force_block::BlockReply;
+
+
 static appbase::abstract_plugin& _grpc_client_plugin = app().register_plugin<grpc_client_plugin>();
 
 class grpc_stub
 {
 public:
   grpc_stub(std::shared_ptr<Channel> channel)
-      : stub_(Eos_Service::NewStub(channel)) {}
+      : stub_(Eos_Service::NewStub(channel)),
+      transfer_stub_(grpc_transfer::NewStub(channel)),
+      transaction_stub_(grpc_transaction::NewStub(channel)),
+      block_stub_(grpc_block::NewStub(channel)) {}
   std::string PutRequest(std::string action,std::string json);
+  std::string PutTransferRequest(std::string from,std::string to,std::string amount,std::string memo,std::string trx_id);
+  std::string PutTransactionRequest(int blocknum,std::string trxjson,std::string trx_id);
+  std::string PutBlockRequest(int blocknum,vector<BlockTransRequest> &blockTrans);
   ~grpc_stub(){}
 private:
   std::unique_ptr<Eos_Service::Stub> stub_;
+  std::unique_ptr<grpc_transfer::Stub> transfer_stub_;
+  std::unique_ptr<grpc_transaction::Stub> transaction_stub_;
+  std::unique_ptr<grpc_block::Stub> block_stub_;
 };
 
 class grpc_client_plugin_impl {
@@ -67,6 +93,8 @@ public:
    void init();
    boost::thread client_thread;
    void consume_blocks();
+   
+   void insert_default_abi();
 
    fc::optional<boost::signals2::scoped_connection> accepted_block_connection;
    fc::optional<boost::signals2::scoped_connection> irreversible_block_connection;
@@ -84,8 +112,33 @@ public:
    void process_accepted_block( const chain::block_state_ptr& );
    //void _process_accepted_block( const chain::block_state_ptr& );
    void process_irreversible_block(const chain::block_state_ptr&);
-   //void _process_irreversible_block(const chain::block_state_ptr&);
+   void _process_irreversible_block(const chain::block_state_ptr&);
    template<typename Queue, typename Entry> void queue(Queue& queue, const Entry& e);
+
+   optional<abi_serializer> get_abi_serializer( account_name n );
+   template<typename T> fc::variant to_variant_with_abi( const T& obj );
+
+   void purge_abi_cache();
+
+   fc::microseconds abi_serializer_max_time;
+   size_t abi_cache_size = 0;
+   struct by_account;
+   struct by_last_access;
+
+   struct abi_cache {
+      account_name                     account;
+      fc::time_point                   last_accessed;
+      fc::optional<abi_serializer>     serializer;
+   };
+
+   typedef boost::multi_index_container<abi_cache,
+         indexed_by<
+               ordered_unique< tag<by_account>,  member<abi_cache,account_name,&abi_cache::account> >,
+               ordered_non_unique< tag<by_last_access>,  member<abi_cache,fc::time_point,&abi_cache::last_accessed> >
+         >
+   > abi_cache_index_t;
+
+   abi_cache_index_t abi_cache_index;
 
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_queue;
    std::deque<chain::transaction_metadata_ptr> transaction_metadata_process_queue;
@@ -127,6 +180,86 @@ std::string grpc_stub::PutRequest(std::string action,std::string json)
   {
      elog( "Exception on grpc_stub PutRequest: ${e}", ("e", e.what()));
   }
+}
+
+std::string grpc_stub::PutTransferRequest(std::string from,std::string to,std::string amount,std::string memo,std::string trx_id)
+{
+   try{
+    TransferRequest request;
+    request.set_from(from);
+    request.set_to(to);
+    request.set_amount(amount);
+    request.set_memo(memo);
+    request.set_trxid(trx_id);
+
+    TransferReply reply;
+    ClientContext context;
+    Status status = transfer_stub_->rpc_sendaction(&context, request, &reply);
+    if (status.ok()) {
+      return reply.message();
+    } else {
+      std::cout << status.error_code() << ": " << status.error_message()
+                << std::endl;
+      return "RPC failed";
+    }
+   }catch(std::exception& e)
+   {
+     elog( "Exception on grpc_stub PutRequest: ${e}", ("e", e.what()));
+   }
+}
+
+std::string grpc_stub::PutTransactionRequest(int blocknum,std::string trxjson,std::string trx_id)
+{
+   try{
+    TransactionRequest request;
+    request.set_blocknum(blocknum);
+    request.set_trx(trxjson);
+    request.set_trxid(trx_id);
+    
+
+    TransactionReply reply;
+    ClientContext context;
+    Status status = transaction_stub_->rpc_sendaction(&context, request, &reply);
+    if (status.ok()) {
+      return reply.message();
+    } else {
+      std::cout << status.error_code() << ": " << status.error_message()
+                << std::endl;
+      return "RPC failed";
+    }
+   }catch(std::exception& e)
+   {
+     elog( "Exception on grpc_stub PutRequest: ${e}", ("e", e.what()));
+   }
+}
+
+std::string grpc_stub::PutBlockRequest(int blocknum,vector<BlockTransRequest> &blockTrans)
+{
+   try{
+    BlockRequest request;
+    request.set_blocknum(blocknum);
+    int nsize = blockTrans.size();
+    for (int i=0;i!=nsize;++i)
+    {
+       BlockTransRequest *blockTranstemp = request.add_trans();
+       *blockTranstemp = blockTrans[i];
+    }
+    
+
+    BlockReply reply;
+    ClientContext context;
+    Status status = block_stub_->rpc_sendaction(&context, request, &reply);
+    if (status.ok()) {
+      return reply.message();
+    } else {
+      std::cout << status.error_code() << ": " << status.error_message()
+                << std::endl;
+      return "RPC failed";
+    }
+   }catch(std::exception& e)
+   {
+     elog( "Exception on grpc_stub PutRequest: ${e}", ("e", e.what()));
+   }
 }
 
 template<typename Queue, typename Entry>
@@ -204,7 +337,7 @@ void grpc_client_plugin_impl::process_accepted_transaction( const chain::transac
        const auto& trx = t->trx;
        auto json = fc::json::to_string( trx );
        std::string action = std::string("process_accepted_transaction");
-      auto reply = _grpc_stub->PutRequest(action,json);
+    //  auto reply = _grpc_stub->PutRequest(action,json);
    } catch (fc::exception& e) {
       elog("FC Exception while processing accepted transaction metadata: ${e}", ("e", e.to_detail_string()));
    } catch (std::exception& e) {
@@ -231,7 +364,7 @@ void grpc_client_plugin_impl::process_applied_transaction( const chain::transact
 
 void grpc_client_plugin_impl::process_irreversible_block(const chain::block_state_ptr& bs) {
   try {
-        //_process_irreversible_block( bs );
+        _process_irreversible_block( bs );
   } catch (fc::exception& e) {
      elog("FC Exception while processing irreversible block: ${e}", ("e", e.to_detail_string()));
   } catch (std::exception& e) {
@@ -239,6 +372,51 @@ void grpc_client_plugin_impl::process_irreversible_block(const chain::block_stat
   } catch (...) {
      elog("Unknown exception while processing irreversible block");
   }
+}
+
+void grpc_client_plugin_impl::_process_irreversible_block(const chain::block_state_ptr& bs) {
+      const auto block_num = bs->block->block_num();
+      bool transactions_in_block = false;
+      vector<BlockTransRequest> blockTans;
+      bool HasTransaction = false;
+      for( const auto& receipt : bs->block->transactions ) {
+         string trx_id_str;
+
+
+         // bool executed = receipt->status == chain::transaction_receipt_header::executed;
+         // if (!executed) {
+         //    continue ;
+         // }
+         if( receipt.trx.contains<packed_transaction>() ) {
+            const auto& pt = receipt.trx.get<packed_transaction>();
+            // get id via get_raw_transaction() as packed_transaction.id() mutates internal transaction state
+            const auto& raw = pt.get_raw_transaction();
+            const auto& trx = fc::raw::unpack<transaction>( raw );
+
+            const auto& id = trx.id();
+            trx_id_str = id.str();
+
+            auto v = to_variant_with_abi( trx );
+            string trx_json = fc::json::to_string( v );
+            //将transaction的信息发过去  block的信息额外再添加
+           // auto reply = _grpc_stub->PutTransactionRequest(block_num,trx_json,trx_id_str);
+
+            BlockTransRequest tempBlockTrans;
+            tempBlockTrans.set_trx(trx_json);
+            tempBlockTrans.set_trxid(trx_id_str);
+            blockTans.push_back(tempBlockTrans);
+            HasTransaction = true;
+           
+         } else {
+            const auto& id = receipt.trx.get<transaction_id_type>();
+            trx_id_str = id.str();
+         }
+
+      }
+      if (HasTransaction)
+         auto reply = _grpc_stub->PutBlockRequest(block_num,blockTans);
+
+
 }
 
 void grpc_client_plugin_impl::process_accepted_block( const chain::block_state_ptr& bs ) {
@@ -255,6 +433,7 @@ void grpc_client_plugin_impl::process_accepted_block( const chain::block_state_p
 
 void grpc_client_plugin_impl::consume_blocks() {
    try {
+      //insert_default_abi();
       while (true) {
          boost::mutex::scoped_lock lock(mtx);
          while ( transaction_metadata_queue.empty() &&
@@ -339,6 +518,85 @@ void grpc_client_plugin_impl::consume_blocks() {
    }
 }
 
+void grpc_client_plugin_impl::purge_abi_cache() {
+   if( abi_cache_index.size() < abi_cache_size ) return;
+
+   // remove the oldest (smallest) last accessed
+   auto& idx = abi_cache_index.get<by_last_access>();
+   auto itr = idx.begin();
+   if( itr != idx.end() ) {
+      idx.erase( itr );
+   }
+}
+
+optional<abi_serializer> grpc_client_plugin_impl::get_abi_serializer( account_name n ) {
+   if( n.good()) {
+      try {
+
+         auto itr = abi_cache_index.find( n );
+         if( itr != abi_cache_index.end() ) {
+            abi_cache_index.modify( itr, []( auto& entry ) {
+               entry.last_accessed = fc::time_point::now();
+            });
+
+            return itr->serializer;
+         }
+
+      } FC_CAPTURE_AND_LOG((n))
+   }
+   return optional<abi_serializer>();
+}
+
+template<typename T>
+fc::variant grpc_client_plugin_impl::to_variant_with_abi( const T& obj ) {
+   fc::variant pretty_output;
+   abi_serializer::to_variant( obj, pretty_output,
+                               [&]( account_name n ) { return get_abi_serializer( n ); },
+                               abi_serializer_max_time );
+   return pretty_output;
+}
+
+void grpc_client_plugin_impl::insert_default_abi()
+{
+   //eosio.token
+   {
+      auto abiPath = app().config_dir() / "eosio.token" += ".abi";
+      FC_ASSERT( fc::exists( abiPath ), "no abi file found ");
+      auto abijson = fc::json::from_file(abiPath).as<abi_def>();
+      auto abi = fc::raw::pack(abijson);
+      abi_def abi_def = fc::raw::unpack<chain::abi_def>( abi );
+     // const string json_str = fc::json::to_string( abi_def );
+     purge_abi_cache(); // make room if necessary
+     abi_cache entry;
+     entry.account = N(eosio.token);
+     entry.last_accessed = fc::time_point::now();
+     abi_serializer abis;
+     abis.set_abi( abi_def, abi_serializer_max_time );
+     entry.serializer.emplace( std::move( abis ) );
+     abi_cache_index.insert( entry );
+   }
+
+   //eosio
+   {
+      auto abiPath = app().config_dir() / "System01" += ".abi";
+      FC_ASSERT( fc::exists( abiPath ), "no abi file found ");
+      auto abijson = fc::json::from_file(abiPath).as<abi_def>();
+      auto abi = fc::raw::pack(abijson);
+      abi_def abi_def = fc::raw::unpack<chain::abi_def>( abi );
+     // const string json_str = fc::json::to_string( abi_def );
+     purge_abi_cache(); // make room if necessary
+     abi_cache entry;
+     entry.account = N(eosio);
+     entry.last_accessed = fc::time_point::now();
+     abi_serializer abis;
+     abis.set_abi( abi_def, abi_serializer_max_time );
+     entry.serializer.emplace( std::move( abis ) );
+     abi_cache_index.insert( entry );
+   }
+
+
+}
+
 void grpc_client_plugin_impl::init()
 {
    try {
@@ -385,6 +643,8 @@ void grpc_client_plugin::set_program_options(options_description& cli, options_d
    cfg.add_options()
          ("grpc-client-address", bpo::value<std::string>(),
          "grpc-client-address string.grcp server bind ip and port. Example:127.0.0.1:21005")
+         ("grpc-abi-cache-size", bpo::value<uint32_t>()->default_value(2048),
+          "The maximum size of the abi cache for serializing data.")
          ;
 }
 
@@ -394,6 +654,12 @@ void grpc_client_plugin::plugin_initialize(const variables_map& options)
          if( options.count( "grpc-client-address" )) {
             my->client_address = options.at( "grpc-client-address" ).as<std::string>();
             //b_need_start = true;
+
+         if( options.count( "grpc-abi-cache-size" )) {
+            my->abi_cache_size = options.at( "grpc-abi-cache-size" ).as<uint32_t>();
+            EOS_ASSERT( my->abi_cache_size > 0, chain::plugin_config_exception, "mongodb-abi-cache-size > 0 required" );
+         }
+         my->abi_serializer_max_time = app().get_plugin<chain_plugin>().get_abi_serializer_max_time();
 
 // hook up to signals on controller
          chain_plugin* chain_plug = app().find_plugin<chain_plugin>();

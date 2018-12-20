@@ -38,17 +38,58 @@ add_custom_command(
         "${hw_proto}"
       DEPENDS "${hw_proto}")
 
+#include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+
+get_filename_component(hw_proto "./include/protos/transfer.proto" ABSOLUTE)
+get_filename_component(hw_proto_path "${hw_proto}" PATH)
+set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/transfer.pb.cc")
+set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/transfer.pb.h")
+set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/transfer.grpc.pb.cc")
+set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/transfer.grpc.pb.h")
+add_custom_command(
+      OUTPUT "${hw_proto_srcs}" "${hw_proto_hdrs}" "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
+      COMMAND ${_PROTOBUF_PROTOC}
+      ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+        --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+        -I "${hw_proto_path}"
+        --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+        "${hw_proto}"
+      DEPENDS "${hw_proto}")
+
+get_filename_component(hw_proto "./include/protos/transaction.proto" ABSOLUTE)
+get_filename_component(hw_proto_path "${hw_proto}" PATH)
+set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/transaction.pb.cc")
+set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/transaction.pb.h")
+set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/transaction.grpc.pb.cc")
+set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/transaction.grpc.pb.h")
+add_custom_command(
+      OUTPUT "${hw_proto_srcs}" "${hw_proto_hdrs}" "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
+      COMMAND ${_PROTOBUF_PROTOC}
+      ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+        --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+        -I "${hw_proto_path}"
+        --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+        "${hw_proto}"
+      DEPENDS "${hw_proto}")
+
+get_filename_component(hw_proto "./include/protos/block.proto" ABSOLUTE)
+get_filename_component(hw_proto_path "${hw_proto}" PATH)
+set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/block.pb.cc")
+set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/block.pb.h")
+set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/block.grpc.pb.cc")
+set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/block.grpc.pb.h")
+add_custom_command(
+      OUTPUT "${hw_proto_srcs}" "${hw_proto_hdrs}" "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
+      COMMAND ${_PROTOBUF_PROTOC}
+      ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+        --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+        -I "${hw_proto_path}"
+        --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+        "${hw_proto}"
+      DEPENDS "${hw_proto}")
+
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-#foreach(_target
-#  eos_server.o eos_client.o)
-#  add_executable(${_target} "${_target}.cpp"
-#    ${hw_proto_srcs}
-#    ${hw_grpc_srcs})
-#  target_link_libraries(${_target}
-#    ${_GRPC_GRPCPP_UNSECURE}
-#    ${_PROTOBUF_LIBPROTOBUF})
-#endforeach()
 
 file(GLOB HEADERS "include/eosio/grpc_plugin/*.hpp")
 include_directories("/usr/local/include/grpcpp")
@@ -58,6 +99,12 @@ add_library( grpc_client_plugin
              grpc_client_plugin.cpp
              eosio_grpc_client.grpc.pb.cc
              eosio_grpc_client.pb.cc
+             transfer.grpc.pb.cc
+             transfer.pb.cc
+             transaction.grpc.pb.cc
+             transaction.pb.cc
+             block.grpc.pb.cc
+             block.pb.cc
              ${HEADERS} )
 
 target_link_libraries( grpc_client_plugin appbase chain_plugin eosio_chain fc ${_GRPC_GRPCPP_UNSECURE} ${_PROTOBUF_LIBPROTOBUF})
